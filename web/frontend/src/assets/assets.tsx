@@ -9,6 +9,11 @@ import {
   UploadIcon,
   KeyRoundIcon,
   DownloadIcon,
+  CodeIcon,
+  FileTextIcon,
+  ServerCrashIcon,
+  GitBranchIcon,
+  AlertTriangleIcon,
 } from "lucide-react";
 
 export interface FooterLinkSection {
@@ -24,6 +29,18 @@ export interface FeatureItem {
 
 export interface HowItWorksItem {
   num: string;
+  icon: ReactNode;
+  title: string;
+  desc: string;
+}
+
+export interface UseCaseItem {
+  icon: ReactNode;
+  title: string;
+  desc: string;
+}
+
+export interface TrustPointItem {
   icon: ReactNode;
   title: string;
   desc: string;
@@ -147,5 +164,41 @@ export const homeHowItWorksData: HowItWorksItem[] = [
     icon: <DownloadIcon size={24} />,
     title: "Get Your Sealed File",
     desc: "The C engine encrypts locally and hands you back a file only your key can open.",
+  },
+];
+
+export const homeUseCasesData: UseCaseItem[] = [
+  {
+    icon: <CodeIcon size={24} />,
+    title: "Developers",
+    desc: "Encrypt API keys, .env files, and credentials before committing to shared repos or backups.",
+  },
+  {
+    icon: <FileTextIcon size={24} />,
+    title: "Personal Documents",
+    desc: "Seal tax records, contracts, and IDs before storing them on cloud drives or USB backups.",
+  },
+  {
+    icon: <ShieldIcon size={24} />,
+    title: "Sensitive Files",
+    desc: "Protect medical records, financial statements, or anything you'd rather not leave exposed.",
+  },
+];
+
+export const homeTrustPointsData: TrustPointItem[] = [
+  {
+    icon: <ServerCrashIcon size={22} />,
+    title: "Zero-Knowledge by Design",
+    desc: "Your password never leaves your machine and is never transmitted or stored anywhere. Veilcrypt can't decrypt your files — only you can.",
+  },
+  {
+    icon: <GitBranchIcon size={22} />,
+    title: "Open-Source C Core",
+    desc: "The encryption engine isn't a black box. Every line handling your keys and file data is auditable, not hidden behind a proprietary API.",
+  },
+  {
+    icon: <AlertTriangleIcon size={22} />,
+    title: "No Server Storage",
+    desc: "Files are processed and immediately discarded. There's no database of uploads, no logs of what you've encrypted.",
   },
 ];
