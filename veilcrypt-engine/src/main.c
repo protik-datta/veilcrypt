@@ -1,133 +1,195 @@
 #include <stdio.h>
-#include <openssl/opensslv.h>
-#include <openssl/evp.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "file_io.h"
 #include "keyderive.h"
 #include "crypto.h"
-#include <string.h>
+#include "format.h"
 
-int main(void)
+static void print_usage(const char *prog_name)
 {
-  printf("Veilcrypt engine starting...\n");
-  printf("OpenSSL version: %s\n", OPENSSL_VERSION_TEXT);
+  fprintf(stderr, "Usage:\n");
+  fprintf(stderr, "  %s encrypt <input_file> <password>\n", prog_name);
+  fprintf(stderr, "  %s decrypt <input_file%s> <password>\n", prog_name, VEIL_EXTENSION);
+}
 
-  const EVP_CIPHER *cipher = EVP_aes_256_gcm();
+static void build_encrypted_name(const char *input_path, char *out_path, size_t out_size)
+{
+  const char *last_slash = strrchr(input_path, '/');
+  const char *search_start = last_slash ? last_slash + 1 : input_path;
+  const char *last_dot = strrchr(search_start, '.');
 
-  if (cipher == NULL)
+  size_t base_len;
+  if (last_dot != NULL)
   {
-    fprintf(stderr, "Error: AES-256-GCM cipher not available.\n");
+    base_len = (size_t)(last_dot - input_path);
+  }
+  else
+  {
+    base_len = strlen(input_path);
+  }
+
+  if (base_len >= out_size)
+  {
+    base_len = out_size - 1;
+  }
+
+  memcpy(out_path, input_path, base_len);
+  out_path[base_len] = '\0';
+
+  // Append .veil
+  size_t remaining = out_size - base_len;
+  snprintf(out_path + base_len, remaining, "%s", VEIL_EXTENSION);
+}
+
+static int do_encrypt(const char *input_path, const char *password)
+{
+  char output_path[1024];
+  build_encrypted_name(input_path, output_path, sizeof(output_path));
+
+  size_t plaintext_len = 0;
+  unsigned char *plaintext = read_file_to_buffer(input_path, &plaintext_len);
+  if (plaintext == NULL)
+  {
+    fprintf(stderr, "Error: could not read input file '%s'\n", input_path);
     return 1;
   }
 
-  printf("AES-256-GCM cipher loaded successfully.\n");
-  printf("Setup OK.\n");
-
-  // // --- Phase 2 test ---
-  // if (copy_file_chunked("test_input.txt", "test_output.txt") == 0)
-  // {
-  //   printf("File copy successful.\n");
-  // }
-  // else
-  // {
-  //   printf("File copy failed.\n");
-  //   return 1;
-  // }
-
-  // --- Phase 3 test ---
   unsigned char salt[SALT_LEN];
   unsigned char key[KEY_LEN];
 
   if (generate_salt(salt) != 0)
   {
-    printf("Salt generation failed.\n");
+    fprintf(stderr, "Error: salt generation failed\n");
+    free(plaintext);
     return 1;
   }
-
-  printf("Salt: ");
-  for (int i = 0; i < SALT_LEN; i++)
-    printf("%02x", salt[i]);
-  printf("\n");
-
-  if (derive_key("mypassword123", salt, key) != 0)
+  if (derive_key(password, salt, key) != 0)
   {
-    printf("Key derivation failed.\n");
+    fprintf(stderr, "Error: key derivation failed\n");
+    free(plaintext);
     return 1;
   }
-
-  printf("Derived key: ");
-  for (int i = 0; i < KEY_LEN; i++)
-    printf("%02x", key[i]);
-  printf("\n");
-
-  // --- Phase 4 test ---
-  const char *message = "This is a secret message for Veilcrypt.";
-  int message_len = (int)strlen(message);
 
   unsigned char iv[IV_LEN];
   unsigned char tag[TAG_LEN];
-  unsigned char ciphertext[256]; // big enough for this test
-
-  int ciphertext_len = encrypt_data(key, (const unsigned char *)message, message_len, iv, ciphertext, tag);
-
-  if (ciphertext_len < 0)
+  unsigned char *ciphertext = malloc(plaintext_len);
+  if (ciphertext == NULL)
   {
-    printf("Encryption failed.\n");
+    fprintf(stderr, "Error: memory allocation failed\n");
+    free(plaintext);
     return 1;
   }
 
-  printf("Plaintext: %s\n", message);
-  printf("Ciphertext (hex): ");
-  for (int i = 0; i < ciphertext_len; i++)
-    printf("%02x", ciphertext[i]);
-  printf("\n");
-  printf("IV (hex): ");
-  for (int i = 0; i < IV_LEN; i++)
-    printf("%02x", iv[i]);
-  printf("\n");
-  printf("Tag (hex): ");
-  for (int i = 0; i < TAG_LEN; i++)
-    printf("%02x", tag[i]);
-  printf("\n");
+  int ciphertext_len = encrypt_data(key, plaintext, (int)plaintext_len, iv, ciphertext, tag);
+  free(plaintext);
 
-  // --- Phase 5 test: correct password ---
-  unsigned char decrypted[256];
-  int decrypted_len = decrypt_data(key, ciphertext, ciphertext_len, iv, tag, decrypted);
-
-  if (decrypted_len < 0)
+  if (ciphertext_len < 0)
   {
-    printf("Decryption failed (correct password test)!\n");
-  }
-  else
-  {
-    decrypted[decrypted_len] = '\0'; // null-terminate to print as string
-    printf("Decrypted: %s\n", decrypted);
-    if (strcmp((char *)decrypted, message) == 0)
-    {
-      printf("Round-trip SUCCESS: decrypted text matches original.\n");
-    }
-    else
-    {
-      printf("Round-trip FAILED: text doesn't match!\n");
-    }
+    fprintf(stderr, "Error: encryption failed\n");
+    free(ciphertext);
+    return 1;
   }
 
-  // --- Phase 5 test: wrong password (should fail) ---
-  unsigned char wrong_key[KEY_LEN];
-  unsigned char wrong_salt[SALT_LEN];
-  generate_salt(wrong_salt); // different salt just to get a different key easily
-  derive_key("wrongpassword", wrong_salt, wrong_key);
-
-  unsigned char decrypted2[256];
-  int decrypted_len2 = decrypt_data(wrong_key, ciphertext, ciphertext_len, iv, tag, decrypted2);
-
-  if (decrypted_len2 < 0)
+  // original_filename (input_path) is now stored inside the .veil file as metadata
+  if (write_vlt_file(output_path, salt, iv, tag, input_path,
+                     ciphertext, (size_t)ciphertext_len) != 0)
   {
-    printf("Wrong password correctly REJECTED (as expected).\n");
-  }
-  else
-  {
-    printf("WARNING: wrong password was accepted — something is wrong!\n");
+    fprintf(stderr, "Error: could not write output file '%s'\n", output_path);
+    free(ciphertext);
+    return 1;
   }
 
+  free(ciphertext);
+  printf("Encrypted successfully: %s -> %s\n", input_path, output_path);
   return 0;
+}
+
+static int do_decrypt(const char *input_path, const char *password)
+{
+  unsigned char salt[SALT_LEN];
+  unsigned char iv[IV_LEN];
+  unsigned char tag[TAG_LEN];
+  char *original_filename = NULL;
+  unsigned char *ciphertext = NULL;
+  size_t ciphertext_len = 0;
+
+  if (read_vlt_file(input_path, salt, iv, tag, &original_filename,
+                    &ciphertext, &ciphertext_len) != 0)
+  {
+    fprintf(stderr, "Error: could not read or parse '%s'\n", input_path);
+    return 1;
+  }
+
+  unsigned char key[KEY_LEN];
+  if (derive_key(password, salt, key) != 0)
+  {
+    fprintf(stderr, "Error: key derivation failed\n");
+    free(original_filename);
+    free(ciphertext);
+    return 1;
+  }
+
+  unsigned char *plaintext = malloc(ciphertext_len > 0 ? ciphertext_len : 1);
+  if (plaintext == NULL)
+  {
+    fprintf(stderr, "Error: memory allocation failed\n");
+    free(original_filename);
+    free(ciphertext);
+    return 1;
+  }
+
+  int plaintext_len = decrypt_data(key, ciphertext, (int)ciphertext_len, iv, tag, plaintext);
+  free(ciphertext);
+
+  if (plaintext_len < 0)
+  {
+    fprintf(stderr, "Error: decryption failed (wrong password or corrupted file)\n");
+    free(original_filename);
+    free(plaintext);
+    return 1;
+  }
+
+  // Output filename comes from metadata stored inside the .veil file, not from input_path
+  if (write_buffer_to_file(original_filename, plaintext, (size_t)plaintext_len) != 0)
+  {
+    fprintf(stderr, "Error: could not write output file '%s'\n", original_filename);
+    free(original_filename);
+    free(plaintext);
+    return 1;
+  }
+
+  printf("Decrypted successfully: %s -> %s\n", input_path, original_filename);
+  free(original_filename);
+  free(plaintext);
+  return 0;
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc != 4)
+  {
+    print_usage(argv[0]);
+    return 1;
+  }
+
+  const char *command = argv[1];
+  const char *input_path = argv[2];
+  const char *password = argv[3];
+
+  if (strcmp(command, "encrypt") == 0)
+  {
+    return do_encrypt(input_path, password);
+  }
+  else if (strcmp(command, "decrypt") == 0)
+  {
+    return do_decrypt(input_path, password);
+  }
+  else
+  {
+    fprintf(stderr, "Error: unknown command '%s'\n", command);
+    print_usage(argv[0]);
+    return 1;
+  }
 }
