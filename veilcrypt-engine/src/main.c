@@ -2,6 +2,7 @@
 #include <openssl/opensslv.h>
 #include <openssl/evp.h>
 #include "file_io.h"
+#include "keyderive.h"
 
 int main(void)
 {
@@ -19,16 +20,31 @@ int main(void)
   printf("AES-256-GCM cipher loaded successfully.\n");
   printf("Setup OK.\n");
 
-  // --- Phase 2 test ---
-  if (copy_file_chunked("test_input.txt", "test_output.txt") == 0)
+  // --- Phase 3 test ---
+  unsigned char salt[SALT_LEN];
+  unsigned char key[KEY_LEN];
+
+  if (generate_salt(salt) != 0)
   {
-    printf("File copy successful.\n");
-  }
-  else
-  {
-    printf("File copy failed.\n");
+    printf("Salt generation failed.\n");
     return 1;
   }
+
+  printf("Salt: ");
+  for (int i = 0; i < SALT_LEN; i++)
+    printf("%02x", salt[i]);
+  printf("\n");
+
+  if (derive_key("mypassword123", salt, key) != 0)
+  {
+    printf("Key derivation failed.\n");
+    return 1;
+  }
+
+  printf("Derived key: ");
+  for (int i = 0; i < KEY_LEN; i++)
+    printf("%02x", key[i]);
+  printf("\n");
 
   return 0;
 }
