@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "file_io.h"
 #include "keyderive.h"
@@ -12,6 +13,26 @@ static void print_usage(const char *prog_name)
   fprintf(stderr, "Usage:\n");
   fprintf(stderr, "  %s encrypt <input_file> <password>\n", prog_name);
   fprintf(stderr, "  %s decrypt <input_file%s> <password>\n", prog_name, VEIL_EXTENSION);
+}
+
+static int file_exists(const char *path)
+{
+  struct stat buffer;
+  return (stat(path, &buffer) == 0);
+}
+
+static int confirm_overwrite(const char *path)
+{
+  printf("Warning: '%s' already exists. Overwrite? (y/n): ", path);
+  fflush(stdout);
+
+  char response[8];
+  if (fgets(response, sizeof(response), stdin) == NULL)
+  {
+    return 0;
+  }
+
+  return (response[0] == 'y' || response[0] == 'Y');
 }
 
 static void build_encrypted_name(const char *input_path, char *out_path, size_t out_size)
@@ -38,15 +59,35 @@ static void build_encrypted_name(const char *input_path, char *out_path, size_t 
   memcpy(out_path, input_path, base_len);
   out_path[base_len] = '\0';
 
-  // Append .veil
   size_t remaining = out_size - base_len;
   snprintf(out_path + base_len, remaining, "%s", VEIL_EXTENSION);
 }
 
 static int do_encrypt(const char *input_path, const char *password)
 {
+  if (strlen(password) == 0)
+  {
+    fprintf(stderr, "Error: password cannot be empty\n");
+    return 1;
+  }
+
   char output_path[1024];
   build_encrypted_name(input_path, output_path, sizeof(output_path));
+
+  if (strcmp(input_path, output_path) == 0)
+  {
+    fprintf(stderr, "Error: output path would be identical to input path\n");
+    return 1;
+  }
+
+  if (file_exists(output_path))
+  {
+    if (!confirm_overwrite(output_path))
+    {
+      printf("Encryption cancelled.\n");
+      return 1;
+    }
+  }
 
   size_t plaintext_len = 0;
   unsigned char *plaintext = read_file_to_buffer(input_path, &plaintext_len);
@@ -92,7 +133,6 @@ static int do_encrypt(const char *input_path, const char *password)
     return 1;
   }
 
-  // original_filename (input_path) is now stored inside the .veil file as metadata
   if (write_vlt_file(output_path, salt, iv, tag, input_path,
                      ciphertext, (size_t)ciphertext_len) != 0)
   {
@@ -108,6 +148,12 @@ static int do_encrypt(const char *input_path, const char *password)
 
 static int do_decrypt(const char *input_path, const char *password)
 {
+  if (strlen(password) == 0)
+  {
+    fprintf(stderr, "Error: password cannot be empty\n");
+    return 1;
+  }
+
   unsigned char salt[SALT_LEN];
   unsigned char iv[IV_LEN];
   unsigned char tag[TAG_LEN];
@@ -120,6 +166,17 @@ static int do_decrypt(const char *input_path, const char *password)
   {
     fprintf(stderr, "Error: could not read or parse '%s'\n", input_path);
     return 1;
+  }
+
+  if (file_exists(original_filename))
+  {
+    if (!confirm_overwrite(original_filename))
+    {
+      printf("Decryption cancelled.\n");
+      free(original_filename);
+      free(ciphertext);
+      return 1;
+    }
   }
 
   unsigned char key[KEY_LEN];
@@ -151,7 +208,6 @@ static int do_decrypt(const char *input_path, const char *password)
     return 1;
   }
 
-  // Output filename comes from metadata stored inside the .veil file, not from input_path
   if (write_buffer_to_file(original_filename, plaintext, (size_t)plaintext_len) != 0)
   {
     fprintf(stderr, "Error: could not write output file '%s'\n", original_filename);
