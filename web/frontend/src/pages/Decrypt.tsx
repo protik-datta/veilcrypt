@@ -4,13 +4,18 @@ import FileDropzone from "../components/app/FileDropzone";
 import PasswordField from "../components/app/PasswordField";
 import ProcessButton from "../components/app/ProcessButton";
 import ResultPanel from "../components/app/ResultPanel";
-import { processFile, type EncryptResult } from "../lib/encryptApi";
+import { decryptFile } from "../lib/api";
+
+interface DecryptResult {
+  fileName: string;
+  downloadUrl: string;
+}
 
 export default function Decrypt() {
   const [file, setFile] = useState<File | null>(null);
   const [password, setPassword] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [result, setResult] = useState<EncryptResult | null>(null);
+  const [result, setResult] = useState<DecryptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async () => {
@@ -18,8 +23,9 @@ export default function Decrypt() {
     setIsProcessing(true);
     setError(null);
     try {
-      const res = await processFile(file, password, "decrypt");
-      setResult(res);
+      const { blob, filename } = await decryptFile(file, password);
+      const downloadUrl = URL.createObjectURL(blob);
+      setResult({ fileName: filename, downloadUrl });
     } catch {
       setError(
         "Couldn't unseal this file — check your password and try again.",
@@ -30,6 +36,9 @@ export default function Decrypt() {
   };
 
   const handleReset = () => {
+    if (result) {
+      URL.revokeObjectURL(result.downloadUrl);
+    }
     setFile(null);
     setPassword("");
     setResult(null);
@@ -52,7 +61,7 @@ export default function Decrypt() {
 
       {!result && (
         <div className="space-y-4">
-          <FileDropzone file={file} setFile={setFile} accept=".enc" />
+          <FileDropzone file={file} setFile={setFile} accept=".veil" />
           <PasswordField
             password={password}
             setPassword={setPassword}

@@ -1,11 +1,15 @@
-// pages/Encrypt.tsx
 import { useState } from "react";
 import { LockIcon } from "lucide-react";
 import FileDropzone from "../components/app/FileDropzone";
 import PasswordField from "../components/app/PasswordField";
 import ProcessButton from "../components/app/ProcessButton";
 import ResultPanel from "../components/app/ResultPanel";
-import { processFile, type EncryptResult } from "../lib/encryptApi";
+import { encryptFile } from "../lib/api";
+
+interface EncryptResult {
+  fileName: string;
+  downloadUrl: string;
+}
 
 export default function Encrypt() {
   const [file, setFile] = useState<File | null>(null);
@@ -19,16 +23,20 @@ export default function Encrypt() {
     setIsProcessing(true);
     setError(null);
     try {
-      const res = await processFile(file, password, "encrypt");
-      setResult(res);
-    } catch {
-      setError("Something went wrong while sealing the file. Try again.");
+      const { blob, filename } = await encryptFile(file, password);
+      const downloadUrl = URL.createObjectURL(blob);
+      setResult({ fileName: filename, downloadUrl });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Encryption failed.");
     } finally {
       setIsProcessing(false);
     }
   };
 
   const handleReset = () => {
+    if (result) {
+      URL.revokeObjectURL(result.downloadUrl);
+    }
     setFile(null);
     setPassword("");
     setResult(null);

@@ -1,4 +1,4 @@
-import { homeUseCasesData } from "../../assets/assets";
+import { homeUseCasesData } from "../../assets/assests";
 
 export default function UseCases() {
   return (
