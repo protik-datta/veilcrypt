@@ -1,0 +1,40 @@
+# ---- Stage 1: Build the C engine ----
+FROM ubuntu:22.04 AS c-builder
+
+RUN apt-get update && apt-get install -y \
+  build-essential \
+  libssl-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/veilcrypt-engine
+COPY veilcrypt-engine/ .
+RUN make
+
+# ---- Stage 2: Node.js backend ----
+FROM node:20-slim
+
+# OpenSSL runtime library needed by the compiled binary
+RUN apt-get update && apt-get install -y \
+  libssl3 \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the compiled C binary from stage 1
+COPY --from=c-builder /app/veilcrypt-engine/build/veilcrypt /app/veilcrypt-engine/build/veilcrypt
+
+# Install backend dependencies
+COPY web/server/package*.json ./web/server/
+RUN cd web/server && npm install --omit=dev
+
+# Copy backend source
+COPY web/server ./web/server
+
+WORKDIR /app/web/server
+
+ENV VEILCRYPT_BINARY_PATH=/app/veilcrypt-engine/build/veilcrypt
+ENV PORT=5005
+
+EXPOSE 5005
+
+CMD ["node", "server.js"]
