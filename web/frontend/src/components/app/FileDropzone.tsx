@@ -1,5 +1,6 @@
 import { useRef, useState, type DragEvent, type ChangeEvent } from "react";
 import { UploadCloudIcon, XIcon } from "lucide-react";
+import { trackEvent } from "../../lib/analytics";
 
 interface FileDropzoneProps {
   file: File | null;
@@ -25,12 +26,18 @@ export default function FileDropzone({
     e.preventDefault();
     setIsDragging(false);
     const dropped = e.dataTransfer.files?.[0];
-    if (dropped) setFile(dropped);
+    if (dropped) {
+      setFile(dropped);
+      trackEvent("file_dropped", { fileName: dropped.name });
+    }
   };
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
-    if (selected) setFile(selected);
+    if (selected) {
+      setFile(selected);
+      trackEvent("file_selected", { fileName: selected.name });
+    }
   };
 
   if (file) {

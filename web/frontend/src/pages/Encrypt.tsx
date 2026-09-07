@@ -5,6 +5,7 @@ import PasswordField from "../components/app/PasswordField";
 import ProcessButton from "../components/app/ProcessButton";
 import ResultPanel from "../components/app/ResultPanel";
 import { encryptFile } from "../lib/api";
+import { trackEvent } from "../lib/analytics";
 
 interface EncryptResult {
   fileName: string;
@@ -23,10 +24,13 @@ export default function Encrypt() {
     setIsProcessing(true);
     setError(null);
     try {
+      trackEvent("encrypt_file_attempt", { fileName: file.name });
       const { blob, filename } = await encryptFile(file, password);
       const downloadUrl = URL.createObjectURL(blob);
       setResult({ fileName: filename, downloadUrl });
+      trackEvent("encrypt_file_success", { fileName: file.name });
     } catch (err) {
+      trackEvent("encrypt_file_failure", { fileName: file.name });
       setError(err instanceof Error ? err.message : "Encryption failed.");
     } finally {
       setIsProcessing(false);

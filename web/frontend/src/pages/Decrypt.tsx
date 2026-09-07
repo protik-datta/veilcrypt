@@ -5,6 +5,7 @@ import PasswordField from "../components/app/PasswordField";
 import ProcessButton from "../components/app/ProcessButton";
 import ResultPanel from "../components/app/ResultPanel";
 import { decryptFile } from "../lib/api";
+import { trackEvent } from "../lib/analytics";
 
 interface DecryptResult {
   fileName: string;
@@ -23,10 +24,13 @@ export default function Decrypt() {
     setIsProcessing(true);
     setError(null);
     try {
+      trackEvent("decrypt_file_attempt", { fileName: file.name });
       const { blob, filename } = await decryptFile(file, password);
       const downloadUrl = URL.createObjectURL(blob);
       setResult({ fileName: filename, downloadUrl });
+      trackEvent("decrypt_file_success", { fileName: file.name });
     } catch {
+      trackEvent("decrypt_file_failure", { fileName: file.name });
       setError(
         "Couldn't unseal this file — check your password and try again.",
       );

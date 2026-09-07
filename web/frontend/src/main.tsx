@@ -3,6 +3,9 @@ import { BrowserRouter } from "react-router-dom";
 import "./index.css";
 import App from "./App.tsx";
 import { ThemeProvider } from "./context/ThemeContext.tsx";
+import { initAnalytics } from "./lib/analytics.tsx";
+
+initAnalytics();
 
 createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
