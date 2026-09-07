@@ -6,6 +6,7 @@ import Footer from "./components/common/Footer";
 import Encrypt from "./pages/Encrypt";
 import Decrypt from "./pages/Decrypt";
 import Keys from "./pages/Keys";
+import Docs from './pages/Docs';
 
 const App = () => {
   return (
@@ -17,6 +18,7 @@ const App = () => {
         <Route path="/app" element={<Encrypt />} />
         <Route path="/decrypt" element={<Decrypt />} />
         <Route path="/keys" element={<Keys />} />
+        <Route path="/docs" element={<Docs />} />
       </Routes>
       <Footer />
     </>

@@ -9,6 +9,7 @@ import {
   Sun,
   Moon,
   ChartNoAxesColumnIcon,
+  FileCodeIcon,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -26,6 +27,11 @@ export default function Navbar() {
       path: "/keys",
       label: "My Keys",
       icon: <KeyRound size={18} />,
+    },
+    {
+      path: "/docs",
+      label: "Documentation",
+      icon: <FileCodeIcon size={18} />,
     },
   ];
 
