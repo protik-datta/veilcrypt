@@ -1,10 +1,18 @@
 # Security Policy
 
-## About Veilcrypt
+## Security Issues
 
-Veilcrypt is a privacy-focused file encryption system built around a native C/OpenSSL cryptographic engine and a web interface.
+Veilcrypt is an open-source security project. We take security vulnerabilities seriously.
 
-The project uses authenticated encryption and password-derived encryption keys to protect file confidentiality and integrity.
+If you discover a vulnerability, please avoid opening a public GitHub issue with sensitive security details.
+
+Instead, report the issue privately to the project maintainer with:
+
+- A clear description of the vulnerability
+- Steps to reproduce
+- Security impact
+- Proof-of-concept, if available
+- Suggested mitigation, if known
 
 ## Supported Versions
 
@@ -13,65 +21,63 @@ The project uses authenticated encryption and password-derived encryption keys t
 | 1.x     | Yes       |
 | < 1.0   | No        |
 
-## Reporting a Vulnerability
-
-If you discover a security vulnerability in Veilcrypt, please do not publicly disclose it through GitHub Issues.
-
-Instead, contact the maintainer privately with:
-
-- A description of the vulnerability
-- Steps to reproduce it
-- Potential security impact
-- Relevant logs or proof-of-concept, if available
-
-Please allow reasonable time for the issue to be investigated and fixed before public disclosure.
-
 ## Security Architecture
 
 Veilcrypt currently uses:
 
-- AES-256-GCM for authenticated encryption
-- PBKDF2-HMAC-SHA256 for password-based key derivation
-- Random salts for key derivation
-- Random IVs/nonces for encryption
-- Authentication tags for ciphertext integrity
-- A custom `.veil` encrypted file format
-- A native C/OpenSSL cryptographic engine
-- Temporary processing directories for file operations
+- AES-256-GCM authenticated encryption
+- PBKDF2-HMAC-SHA256 password-based key derivation
+- Random salts
+- Random IVs/nonces
+- Authentication tags
+- A custom `.veil` file format
+- Native C/OpenSSL cryptographic operations
+- Temporary processing directories
 
-## Data Handling
+## Security Scope
 
-Uploaded files may be temporarily stored during server-side processing.
+Veilcrypt is designed to provide:
 
-Temporary processing data should be removed after the operation completes or fails.
+- File confidentiality
+- Ciphertext integrity
+- Authentication of encrypted data
+- Protection against incorrect passwords
+- Detection of ciphertext tampering
 
-Veilcrypt does not intentionally store user passwords.
+## Limitations
 
-Users should not upload highly sensitive data to a deployment they do not control unless they understand and trust its server-side processing model.
+Veilcrypt cannot protect against:
 
-## Threat Model
-
-Veilcrypt is designed primarily to protect encrypted files against unauthorized access and ciphertext tampering.
-
-The following are outside the security guarantees of the application:
-
-- A compromised client device
-- Malware or keyloggers on the user's device
+- A compromised user's device
+- Malware or keyloggers
 - Weak or compromised passwords
 - A compromised server or hosting environment
-- Compromised operating-system libraries or cryptographic dependencies
-- Vulnerabilities in third-party dependencies
+- Vulnerabilities in OpenSSL or other dependencies
+- Vulnerabilities in the operating system
+- Malicious browser extensions
 
-## Cryptographic Disclaimer
+## Data Processing
 
-Veilcrypt has not undergone an independent professional security audit.
+In the current server-side architecture, files may be temporarily processed on the server during encryption or decryption.
 
-The cryptographic implementation should not be considered a substitute for independently audited security software.
+Temporary processing data is intended to be removed after the operation completes.
 
-Security claims are limited to the documented implementation and architecture.
+Passwords are not intentionally stored by the application.
+
+## Security Audit
+
+Veilcrypt has not yet undergone an independent professional security audit.
+
+Therefore, the project should not be considered a replacement for professionally audited cryptographic software.
 
 ## Responsible Disclosure
 
-Security researchers are encouraged to report vulnerabilities responsibly and privately.
+Please give the maintainers reasonable time to investigate and address security vulnerabilities before publicly disclosing them.
 
-Please avoid accessing, modifying, or deleting data that does not belong to you while investigating a vulnerability.
+Security researchers should avoid accessing, modifying, or deleting data that does not belong to them during security testing.
+
+## Open Source
+
+Veilcrypt is released under the MIT License.
+
+Contributions that improve the security, reliability, testing, and maintainability of the project are welcome.
