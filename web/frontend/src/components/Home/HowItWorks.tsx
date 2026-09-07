@@ -1,4 +1,4 @@
-import { homeHowItWorksData } from "../../assets/assets";
+import { homeHowItWorksData } from "../../assets/assests";
 
 export default function HowItWorks() {
   return (

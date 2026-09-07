@@ -1,5 +1,5 @@
 import { ChartNoAxesColumnIcon } from "lucide-react";
-import { homefooterLinks } from "../../assets/assets";
+import { homefooterLinks } from "../../assets/assests";
 import {
   SiX,
   SiInstagram,

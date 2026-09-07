@@ -29,8 +29,8 @@ const runVeilcrypt = (args, cwd) => {
 };
 
 const extractOutputFilename = (stdout) => {
-  const match = stdout.match(/->\s*(\S+)\s*$/m);
-  return match ? match[1] : null;
+  const match = stdout.match(/->\s*(.+?)\s*$/m);
+  return match ? match[1].trim() : null;
 };
 
 const encryptFile = async (inputFilename, password, cwd) => {

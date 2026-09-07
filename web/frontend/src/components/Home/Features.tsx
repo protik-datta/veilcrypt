@@ -1,4 +1,4 @@
-import { homeFeaturesData } from "../../assets/assets";
+import { homeFeaturesData } from "../../assets/assests";
 
 export default function Features() {
   return (

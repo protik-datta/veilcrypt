@@ -1,4 +1,4 @@
-import { homeTrustPointsData } from "../../assets/assets";
+import { homeTrustPointsData } from "../../assets/assests";
 
 export default function TrustSection() {
   return (

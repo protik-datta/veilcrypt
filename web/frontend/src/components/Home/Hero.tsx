@@ -1,7 +1,7 @@
 import { LockIcon, ArrowRightIcon } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { HomeWave } from "../../assets/assets";
+import { HomeWave } from "../../assets/assests";
 
 export default function Hero() {
   const [fileName, setFileName] = useState("");
