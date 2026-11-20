@@ -1,0 +1,891 @@
+diff -ruN a/include/crypto.h b/include/crypto.h
+--- a/include/crypto.h	2026-11-20 18:19:49.199792294 +0600
++++ b/include/crypto.h	2026-11-20 18:19:49.201521603 +0600
+@@ -6,10 +6,14 @@
+ #define IV_LEN 12
+ #define TAG_LEN 16
+
++int generate_iv(unsigned char *iv);
++
++// aad is authenticated but not encrypted (aad_len may be 0)
+ int encrypt_data(
+     const unsigned char *key,
+     const unsigned char *plaintext, int plaintext_len,
+-    unsigned char *iv,
++    const unsigned char *iv,
++    const unsigned char *aad, int aad_len,
+     unsigned char *ciphertext,
+     unsigned char *tag);
+
+@@ -18,6 +22,7 @@
+     const unsigned char *ciphertext, int ciphertext_len,
+     const unsigned char *iv,
+     const unsigned char *tag,
++    const unsigned char *aad, int aad_len,
+     unsigned char *plaintext);
+
+ #endif
+diff -ruN a/include/file_io.h b/include/file_io.h
+--- a/include/file_io.h	2026-11-20 18:19:49.199814896 +0600
++++ b/include/file_io.h	2026-11-20 18:19:49.201545541 +0600
+@@ -2,9 +2,15 @@
+ #define FILE_IO_H
+
+ #include <stddef.h>
++#include <stdio.h>
+
+ unsigned char *read_file_to_buffer(const char *filePath, size_t *out_size);
+ int write_buffer_to_file(const char *filepath, const unsigned char *data, size_t size);
+ int copy_file_chunked(const char *src_path, const char *dest_path);
+
++// Atomic, owner-only (0600) output: write to a temp file, then rename into place.
++FILE *secure_tmp_open(const char *final_path, char *tmp_path, size_t tmp_size);
++int secure_tmp_commit(FILE *fp, const char *tmp_path, const char *final_path);
++void secure_tmp_abort(FILE *fp, const char *tmp_path);
++
+ #endif
+diff -ruN a/include/format.h b/include/format.h
+--- a/include/format.h	2026-11-20 18:19:49.199823729 +0600
++++ b/include/format.h	2026-11-20 18:19:49.201553727 +0600
+@@ -6,11 +6,15 @@
+ #include "keyderive.h"
+ #include "crypto.h"
+
+-#define MAGIC_BYTES "VLT1"
++#define MAGIC_BYTES "VLT2"    // written by this version
++#define MAGIC_BYTES_V1 "VLT1" // legacy: readable, but filename was not authenticated
+ #define MAGIC_LEN 4
+ #define VEIL_EXTENSION ".veil"
+ #define MAX_FILENAME_LEN 255
+
++// magic + salt + iv + filename_len(2) + filename
++#define AAD_MAX (MAGIC_LEN + SALT_LEN + IV_LEN + 2 + MAX_FILENAME_LEN)
++
+ typedef struct
+ {
+   unsigned char magic[MAGIC_LEN];
+@@ -21,6 +25,15 @@
+
+ #define HEADER_SIZE sizeof(VeilcryptHeader)
+
++const char *path_basename(const char *path);
++int is_safe_filename(const char *name); // 1 = ok, 0 = reject
++
++// Builds the data GCM authenticates alongside the ciphertext. Returns its length.
++size_t build_aad(unsigned char *out,
++                 const unsigned char *salt,
++                 const unsigned char *iv,
++                 const char *filename);
++
+ int write_vlt_file(
+     const char *filepath,
+     const unsigned char *salt,
+@@ -35,6 +48,7 @@
+     unsigned char *iv,
+     unsigned char *tag,
+     char **original_filename,
+-    unsigned char **ciphertext, size_t *ciphertext_len);
++    unsigned char **ciphertext, size_t *ciphertext_len,
++    int *version);
+
+ #endif
+diff -ruN a/src/crypto.c b/src/crypto.c
+--- a/src/crypto.c	2026-11-20 18:19:49.199685488 +0600
++++ b/src/crypto.c	2026-11-20 18:19:49.201406576 +0600
+@@ -3,19 +3,24 @@
+ #include <openssl/rand.h>
+ #include <stdio.h>
+
+-int encrypt_data(
+-    const unsigned char *key,
+-    const unsigned char *plaintext, int plaintext_len,
+-    unsigned char *iv,
+-    unsigned char *ciphertext,
+-    unsigned char *tag)
++int generate_iv(unsigned char *iv)
+ {
+   if (RAND_bytes(iv, IV_LEN) != 1)
+   {
+-    fprintf(stderr, "encrypt_data: RAND_bytes (IV) failed\n");
++    fprintf(stderr, "generate_iv: RAND_bytes failed\n");
+     return -1;
+   }
++  return 0;
++}
+
++int encrypt_data(
++    const unsigned char *key,
++    const unsigned char *plaintext, int plaintext_len,
++    const unsigned char *iv,
++    const unsigned char *aad, int aad_len,
++    unsigned char *ciphertext,
++    unsigned char *tag)
++{
+   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+   if (ctx == NULL)
+   {
+@@ -25,53 +30,48 @@
+
+   int len = 0;
+   int ciphertext_len = 0;
++  int ret = -1;
+
+-  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
++  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
++      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_LEN, NULL) != 1 ||
++      EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
+   {
+-    fprintf(stderr, "encrypt_data: EncryptInit (cipher) failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
+-  }
+-
+-  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_LEN, NULL) != 1)
+-  {
+-    fprintf(stderr, "encrypt_data: set IV length failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    fprintf(stderr, "encrypt_data: cipher setup failed\n");
++    goto done;
+   }
+
+-  if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
++  // AAD must be fed before any plaintext
++  if (aad_len > 0 && EVP_EncryptUpdate(ctx, NULL, &len, aad, aad_len) != 1)
+   {
+-    fprintf(stderr, "encrypt_data: EncryptInit (key/iv) failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    fprintf(stderr, "encrypt_data: AAD update failed\n");
++    goto done;
+   }
+
+   if (EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len) != 1)
+   {
+     fprintf(stderr, "encrypt_data: EncryptUpdate failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    goto done;
+   }
+   ciphertext_len = len;
+
+   if (EVP_EncryptFinal_ex(ctx, ciphertext + len, &len) != 1)
+   {
+     fprintf(stderr, "encrypt_data: EncryptFinal failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    goto done;
+   }
+   ciphertext_len += len;
+
+   if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN, tag) != 1)
+   {
+     fprintf(stderr, "encrypt_data: get tag failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    goto done;
+   }
+
++  ret = ciphertext_len;
++
++done:
+   EVP_CIPHER_CTX_free(ctx);
+-  return ciphertext_len;
++  return ret;
+ }
+
+ int decrypt_data(
+@@ -79,6 +79,7 @@
+     const unsigned char *ciphertext, int ciphertext_len,
+     const unsigned char *iv,
+     const unsigned char *tag,
++    const unsigned char *aad, int aad_len,
+     unsigned char *plaintext)
+ {
+   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+@@ -90,52 +91,44 @@
+
+   int len = 0;
+   int plaintext_len = 0;
++  int ret = -1;
+
+-  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
+-  {
+-    fprintf(stderr, "decrypt_data: DecryptInit (cipher) failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
+-  }
+-
+-  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_LEN, NULL) != 1)
++  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
++      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_LEN, NULL) != 1 ||
++      EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
+   {
+-    fprintf(stderr, "decrypt_data: set IV length failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    fprintf(stderr, "decrypt_data: cipher setup failed\n");
++    goto done;
+   }
+
+-  if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv) != 1)
++  if (aad_len > 0 && EVP_DecryptUpdate(ctx, NULL, &len, aad, aad_len) != 1)
+   {
+-    fprintf(stderr, "decrypt_data: DecryptInit (key/iv) failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    fprintf(stderr, "decrypt_data: AAD update failed\n");
++    goto done;
+   }
+
+   if (EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len) != 1)
+   {
+     fprintf(stderr, "decrypt_data: DecryptUpdate failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    goto done;
+   }
+   plaintext_len = len;
+
+   if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, (void *)tag) != 1)
+   {
+     fprintf(stderr, "decrypt_data: set tag failed\n");
+-    EVP_CIPHER_CTX_free(ctx);
+-    return -1;
++    goto done;
+   }
+
+-  int ret = EVP_DecryptFinal_ex(ctx, plaintext + len, &len);
+-  EVP_CIPHER_CTX_free(ctx);
+-
+-  if (ret <= 0)
++  if (EVP_DecryptFinal_ex(ctx, plaintext + len, &len) <= 0)
+   {
+     fprintf(stderr, "decrypt_data: authentication failed (wrong password or corrupted file)\n");
+-    return -1;
++    goto done;
+   }
+
+-  plaintext_len += len;
+-  return plaintext_len;
++  ret = plaintext_len + len;
++
++done:
++  EVP_CIPHER_CTX_free(ctx);
++  return ret;
+ }
+diff -ruN a/src/file_io.c b/src/file_io.c
+--- a/src/file_io.c	2026-11-20 18:19:49.199728524 +0600
++++ b/src/file_io.c	2026-11-20 18:19:49.201441474 +0600
+@@ -1,6 +1,8 @@
+ #include "file_io.h"
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
+
+ #define CHUNK_SIZE 4096
+
+@@ -51,27 +53,80 @@
+   return buffer;
+ }
+
+-int write_buffer_to_file(const char *filepath, const unsigned char *data, size_t size)
++FILE *secure_tmp_open(const char *final_path, char *tmp_path, size_t tmp_size)
+ {
+-  FILE *fp = fopen(filepath, "wb");
++  int n = snprintf(tmp_path, tmp_size, "%s.tmp.XXXXXX", final_path);
++  if (n < 0 || (size_t)n >= tmp_size)
++  {
++    fprintf(stderr, "secure_tmp_open: path too long\n");
++    return NULL;
++  }
++
++  int fd = mkstemp(tmp_path); // creates the file with mode 0600
++  if (fd < 0)
++  {
++    perror("secure_tmp_open: mkstemp failed");
++    return NULL;
++  }
++
++  FILE *fp = fdopen(fd, "wb");
+   if (fp == NULL)
+   {
+-    perror("write_buffer_to_file: fopen failed");
+-    return -1;
++    perror("secure_tmp_open: fdopen failed");
++    close(fd);
++    unlink(tmp_path);
++    return NULL;
+   }
++  return fp;
++}
+
+-  size_t bytes_written = fwrite(data, 1, size, fp);
++void secure_tmp_abort(FILE *fp, const char *tmp_path)
++{
+   fclose(fp);
++  unlink(tmp_path);
++}
+
+-  if (bytes_written != size)
++int secure_tmp_commit(FILE *fp, const char *tmp_path, const char *final_path)
++{
++  // Surface disk-full / I/O errors instead of reporting a false success
++  if (fflush(fp) != 0 || ferror(fp) || fsync(fileno(fp)) != 0)
+   {
+-    fprintf(stderr, "write_buffer_to_file: short write (%zu of %zu bytes)\n", bytes_written, size);
++    perror("secure_tmp_commit: write failed");
++    secure_tmp_abort(fp, tmp_path);
++    return -1;
++  }
++  if (fclose(fp) != 0)
++  {
++    perror("secure_tmp_commit: fclose failed");
++    unlink(tmp_path);
++    return -1;
++  }
++  if (rename(tmp_path, final_path) != 0)
++  {
++    perror("secure_tmp_commit: rename failed");
++    unlink(tmp_path);
+     return -1;
+   }
+-
+   return 0;
+ }
+
++int write_buffer_to_file(const char *filepath, const unsigned char *data, size_t size)
++{
++  char tmp_path[1100];
++  FILE *fp = secure_tmp_open(filepath, tmp_path, sizeof(tmp_path));
++  if (fp == NULL)
++    return -1;
++
++  if (size > 0 && fwrite(data, 1, size, fp) != size)
++  {
++    fprintf(stderr, "write_buffer_to_file: short write\n");
++    secure_tmp_abort(fp, tmp_path);
++    return -1;
++  }
++
++  return secure_tmp_commit(fp, tmp_path, filepath);
++}
++
+ int copy_file_chunked(const char *src_path, const char *dest_path)
+ {
+   FILE *src = fopen(src_path, "rb");
+diff -ruN a/src/format.c b/src/format.c
+--- a/src/format.c	2026-11-20 18:19:49.199739262 +0600
++++ b/src/format.c	2026-11-20 18:19:49.201452316 +0600
+@@ -1,8 +1,55 @@
+ #include "format.h"
++#include "file_io.h"
++#include <limits.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+
++const char *path_basename(const char *path)
++{
++  const char *slash = strrchr(path, '/');
++  return slash ? slash + 1 : path;
++}
++
++// A stored name must be a plain file name: no directories, no "..", no control chars.
++int is_safe_filename(const char *name)
++{
++  size_t len = strlen(name);
++  if (len == 0 || len > MAX_FILENAME_LEN)
++    return 0;
++  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
++    return 0;
++
++  for (size_t i = 0; i < len; i++)
++  {
++    unsigned char c = (unsigned char)name[i];
++    if (c == '/' || c == '\\' || c < 0x20 || c == 0x7f)
++      return 0;
++  }
++  return 1;
++}
++
++size_t build_aad(unsigned char *out,
++                 const unsigned char *salt,
++                 const unsigned char *iv,
++                 const char *filename)
++{
++  size_t n = 0;
++  size_t flen = strlen(filename);
++
++  memcpy(out + n, MAGIC_BYTES, MAGIC_LEN);
++  n += MAGIC_LEN;
++  memcpy(out + n, salt, SALT_LEN);
++  n += SALT_LEN;
++  memcpy(out + n, iv, IV_LEN);
++  n += IV_LEN;
++  out[n++] = (unsigned char)(flen & 0xff); // explicit little-endian length
++  out[n++] = (unsigned char)((flen >> 8) & 0xff);
++  memcpy(out + n, filename, flen);
++  n += flen;
++  return n;
++}
++
+ int write_vlt_file(
+     const char *filepath,
+     const unsigned char *salt,
+@@ -11,60 +58,39 @@
+     const char *original_filename,
+     const unsigned char *ciphertext, size_t ciphertext_len)
+ {
+-  FILE *fp = fopen(filepath, "wb");
+-  if (fp == NULL)
++  if (!is_safe_filename(original_filename))
+   {
+-    perror("write_vlt_file: fopen failed");
++    fprintf(stderr, "write_vlt_file: invalid filename\n");
+     return -1;
+   }
+
++  char tmp_path[1100];
++  FILE *fp = secure_tmp_open(filepath, tmp_path, sizeof(tmp_path));
++  if (fp == NULL)
++    return -1;
++
+   VeilcryptHeader header;
+   memcpy(header.magic, MAGIC_BYTES, MAGIC_LEN);
+   memcpy(header.salt, salt, SALT_LEN);
+   memcpy(header.iv, iv, IV_LEN);
+   memcpy(header.tag, tag, TAG_LEN);
+
+-  // Write fixed header
+-  if (fwrite(&header, 1, HEADER_SIZE, fp) != HEADER_SIZE)
+-  {
+-    fprintf(stderr, "write_vlt_file: failed to write header\n");
+-    fclose(fp);
+-    return -1;
+-  }
+-
+-  // Write filename length (2 bytes) + filename bytes
+   size_t fname_len = strlen(original_filename);
+-  if (fname_len > MAX_FILENAME_LEN)
+-  {
+-    fprintf(stderr, "write_vlt_file: filename too long\n");
+-    fclose(fp);
+-    return -1;
+-  }
+-  uint16_t fname_len16 = (uint16_t)fname_len;
++  unsigned char len_bytes[2] = {
++      (unsigned char)(fname_len & 0xff),
++      (unsigned char)((fname_len >> 8) & 0xff)};
+
+-  if (fwrite(&fname_len16, sizeof(fname_len16), 1, fp) != 1)
+-  {
+-    fprintf(stderr, "write_vlt_file: failed to write filename length\n");
+-    fclose(fp);
+-    return -1;
+-  }
+-  if (fwrite(original_filename, 1, fname_len, fp) != fname_len)
++  if (fwrite(&header, 1, HEADER_SIZE, fp) != HEADER_SIZE ||
++      fwrite(len_bytes, 1, 2, fp) != 2 ||
++      fwrite(original_filename, 1, fname_len, fp) != fname_len ||
++      (ciphertext_len > 0 && fwrite(ciphertext, 1, ciphertext_len, fp) != ciphertext_len))
+   {
+-    fprintf(stderr, "write_vlt_file: failed to write filename\n");
+-    fclose(fp);
++    fprintf(stderr, "write_vlt_file: write failed\n");
++    secure_tmp_abort(fp, tmp_path);
+     return -1;
+   }
+
+-  // Write ciphertext
+-  if (fwrite(ciphertext, 1, ciphertext_len, fp) != ciphertext_len)
+-  {
+-    fprintf(stderr, "write_vlt_file: failed to write ciphertext\n");
+-    fclose(fp);
+-    return -1;
+-  }
+-
+-  fclose(fp);
+-  return 0;
++  return secure_tmp_commit(fp, tmp_path, filepath);
+ }
+
+ int read_vlt_file(
+@@ -73,8 +99,12 @@
+     unsigned char *iv,
+     unsigned char *tag,
+     char **original_filename,
+-    unsigned char **ciphertext, size_t *ciphertext_len)
++    unsigned char **ciphertext, size_t *ciphertext_len,
++    int *version)
+ {
++  char *fname_buf = NULL;
++  unsigned char *ct_buf = NULL;
++
+   FILE *fp = fopen(filepath, "rb");
+   if (fp == NULL)
+   {
+@@ -82,94 +112,91 @@
+     return -1;
+   }
+
+-  fseek(fp, 0, SEEK_END);
++  if (fseek(fp, 0, SEEK_END) != 0)
++    goto bad_read;
+   long total_size = ftell(fp);
+-  rewind(fp);
++  if (total_size < 0 || fseek(fp, 0, SEEK_SET) != 0)
++    goto bad_read;
+
+-  if (total_size < (long)(HEADER_SIZE + sizeof(uint16_t)))
++  if (total_size < (long)(HEADER_SIZE + 2))
+   {
+-    fprintf(stderr, "read_vlt_file: file too small to be a valid .vlt file\n");
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (file too small)\n");
++    goto fail;
+   }
+
+-  // Read fixed header
+   VeilcryptHeader header;
+-  if (fread(&header, 1, HEADER_SIZE, fp) != HEADER_SIZE)
++  unsigned char len_bytes[2];
++  if (fread(&header, 1, HEADER_SIZE, fp) != HEADER_SIZE ||
++      fread(len_bytes, 1, 2, fp) != 2)
++    goto bad_read;
++
++  if (memcmp(header.magic, MAGIC_BYTES, MAGIC_LEN) == 0)
++    *version = 2;
++  else if (memcmp(header.magic, MAGIC_BYTES_V1, MAGIC_LEN) == 0)
++    *version = 1;
++  else
+   {
+-    fprintf(stderr, "read_vlt_file: failed to read header\n");
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (bad magic bytes)\n");
++    goto fail;
+   }
+
+-  if (memcmp(header.magic, MAGIC_BYTES, MAGIC_LEN) != 0)
++  size_t fname_len = (size_t)len_bytes[0] | ((size_t)len_bytes[1] << 8);
++  long remaining = total_size - (long)HEADER_SIZE - 2;
++  if (fname_len == 0 || fname_len > MAX_FILENAME_LEN || remaining < (long)fname_len)
+   {
+-    fprintf(stderr, "read_vlt_file: invalid file format (bad magic bytes)\n");
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (bad filename length)\n");
++    goto fail;
+   }
+
+-  memcpy(salt, header.salt, SALT_LEN);
+-  memcpy(iv, header.iv, IV_LEN);
+-  memcpy(tag, header.tag, TAG_LEN);
++  fname_buf = malloc(fname_len + 1);
++  if (fname_buf == NULL || fread(fname_buf, 1, fname_len, fp) != fname_len)
++    goto bad_read;
++  fname_buf[fname_len] = '\0';
+
+-  // Read filename length
+-  uint16_t fname_len16;
+-  if (fread(&fname_len16, sizeof(fname_len16), 1, fp) != 1)
++  if (strlen(fname_buf) != fname_len) // embedded NUL
+   {
+-    fprintf(stderr, "read_vlt_file: failed to read filename length\n");
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (bad filename)\n");
++    goto fail;
+   }
+
+-  // Sanity check: does the file even have enough bytes left for the filename?
+-  long remaining = total_size - (long)HEADER_SIZE - (long)sizeof(uint16_t);
+-  if (remaining < (long)fname_len16)
++  // Old VLT1 files stored whatever path was typed on the command line; keep only the name.
++  if (*version == 1)
+   {
+-    fprintf(stderr, "read_vlt_file: corrupted file (filename length invalid)\n");
+-    fclose(fp);
+-    return -1;
++    const char *base = path_basename(fname_buf);
++    memmove(fname_buf, base, strlen(base) + 1);
+   }
+
+-  // Read filename
+-  char *fname_buf = malloc(fname_len16 + 1); // +1 for null terminator
+-  if (fname_buf == NULL)
++  if (!is_safe_filename(fname_buf))
+   {
+-    fprintf(stderr, "read_vlt_file: malloc failed (filename)\n");
+-    fclose(fp);
+-    return -1;
+-  }
+-  if (fname_len16 > 0 && fread(fname_buf, 1, fname_len16, fp) != fname_len16)
+-  {
+-    fprintf(stderr, "read_vlt_file: failed to read filename\n");
+-    free(fname_buf);
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (unsafe filename)\n");
++    goto fail;
+   }
+-  fname_buf[fname_len16] = '\0';
+
+-  // Read ciphertext (everything remaining)
+-  size_t ct_len = (size_t)(remaining - fname_len16);
+-  unsigned char *ct_buf = malloc(ct_len > 0 ? ct_len : 1);
+-  if (ct_buf == NULL)
+-  {
+-    fprintf(stderr, "read_vlt_file: malloc failed (ciphertext)\n");
+-    free(fname_buf);
+-    fclose(fp);
+-    return -1;
+-  }
+-  if (ct_len > 0 && fread(ct_buf, 1, ct_len, fp) != ct_len)
++  size_t ct_len = (size_t)(remaining - (long)fname_len);
++  if (ct_len > (size_t)INT_MAX)
+   {
+-    fprintf(stderr, "read_vlt_file: failed to read ciphertext\n");
+-    free(fname_buf);
+-    free(ct_buf);
+-    fclose(fp);
+-    return -1;
++    fprintf(stderr, "read_vlt_file: invalid file format (file too large)\n");
++    goto fail;
+   }
+
++  ct_buf = malloc(ct_len > 0 ? ct_len : 1);
++  if (ct_buf == NULL || (ct_len > 0 && fread(ct_buf, 1, ct_len, fp) != ct_len))
++    goto bad_read;
++
+   fclose(fp);
++  memcpy(salt, header.salt, SALT_LEN);
++  memcpy(iv, header.iv, IV_LEN);
++  memcpy(tag, header.tag, TAG_LEN);
+   *original_filename = fname_buf;
+   *ciphertext = ct_buf;
+   *ciphertext_len = ct_len;
+   return 0;
++
++bad_read:
++  fprintf(stderr, "read_vlt_file: failed to read file\n");
++fail:
++  free(fname_buf);
++  free(ct_buf);
++  fclose(fp);
++  return -1;
+ }
+diff -ruN a/src/main.c b/src/main.c
+--- a/src/main.c	2026-11-20 18:19:49.199762352 +0600
++++ b/src/main.c	2026-11-20 18:19:49.201475652 +0600
+@@ -1,18 +1,62 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <limits.h>
+ #include <sys/stat.h>
++#include <termios.h>
++#include <unistd.h>
++#include <openssl/crypto.h>
+
+ #include "file_io.h"
+ #include "keyderive.h"
+ #include "crypto.h"
+ #include "format.h"
+
++#define MAX_PASSWORD_LEN 1024
++
+ static void print_usage(const char *prog_name)
+ {
+   fprintf(stderr, "Usage:\n");
+-  fprintf(stderr, "  %s encrypt <input_file> <password>\n", prog_name);
+-  fprintf(stderr, "  %s decrypt <input_file%s> <password>\n", prog_name, VEIL_EXTENSION);
++  fprintf(stderr, "  %s encrypt <input_file> --password-stdin\n", prog_name);
++  fprintf(stderr, "  %s decrypt <input_file%s> --password-stdin\n", prog_name, VEIL_EXTENSION);
++  fprintf(stderr, "  %s encrypt|decrypt <file> <password>   (legacy: password is visible in the process list)\n", prog_name);
++}
++
++// Reads the password from stdin: hidden prompt on a terminal, whole stdin when piped.
++static int read_password_stdin(char *buf, size_t size)
++{
++  int tty = isatty(STDIN_FILENO);
++  struct termios oldt;
++  int restore = 0;
++  size_t n = 0;
++
++  if (tty)
++  {
++    fprintf(stderr, "Password: ");
++    if (tcgetattr(STDIN_FILENO, &oldt) == 0)
++    {
++      struct termios newt = oldt;
++      newt.c_lflag &= ~(tcflag_t)ECHO;
++      restore = (tcsetattr(STDIN_FILENO, TCSANOW, &newt) == 0);
++    }
++    if (fgets(buf, (int)size, stdin) != NULL)
++      n = strlen(buf);
++    if (restore)
++      tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
++    fprintf(stderr, "\n");
++  }
++  else
++  {
++    n = fread(buf, 1, size - 1, stdin);
++  }
++  buf[n] = '\0';
++
++  if (n > 0 && buf[n - 1] == '\n')
++    buf[--n] = '\0';
++  if (n > 0 && buf[n - 1] == '\r')
++    buf[--n] = '\0';
++
++  return (strlen(buf) == n) ? 0 : -1; // reject embedded NUL bytes
+ }
+
+ static int file_exists(const char *path)
+@@ -71,6 +115,14 @@
+     return 1;
+   }
+
++  // Store only the file name, never the directories it was found in
++  const char *stored_name = path_basename(input_path);
++  if (!is_safe_filename(stored_name))
++  {
++    fprintf(stderr, "Error: input file name is not valid\n");
++    return 1;
++  }
++
+   char output_path[1024];
+   build_encrypted_name(input_path, output_path, sizeof(output_path));
+
+@@ -97,6 +149,13 @@
+     return 1;
+   }
+
++  if (plaintext_len > (size_t)INT_MAX)
++  {
++    fprintf(stderr, "Error: file too large (limit is 2 GiB)\n");
++    free(plaintext);
++    return 1;
++  }
++
+   unsigned char salt[SALT_LEN];
+   unsigned char key[KEY_LEN];
+
+@@ -115,7 +174,19 @@
+
+   unsigned char iv[IV_LEN];
+   unsigned char tag[TAG_LEN];
+-  unsigned char *ciphertext = malloc(plaintext_len);
++  unsigned char aad[AAD_MAX];
++
++  if (generate_iv(iv) != 0)
++  {
++    fprintf(stderr, "Error: IV generation failed\n");
++    OPENSSL_cleanse(key, sizeof(key));
++    OPENSSL_cleanse(plaintext, plaintext_len);
++    free(plaintext);
++    return 1;
++  }
++  size_t aad_len = build_aad(aad, salt, iv, stored_name);
++
++  unsigned char *ciphertext = malloc(plaintext_len > 0 ? plaintext_len : 1);
+   if (ciphertext == NULL)
+   {
+     fprintf(stderr, "Error: memory allocation failed\n");
+@@ -123,7 +194,10 @@
+     return 1;
+   }
+
+-  int ciphertext_len = encrypt_data(key, plaintext, (int)plaintext_len, iv, ciphertext, tag);
++  int ciphertext_len = encrypt_data(key, plaintext, (int)plaintext_len, iv,
++                                    aad, (int)aad_len, ciphertext, tag);
++  OPENSSL_cleanse(key, sizeof(key));
++  OPENSSL_cleanse(plaintext, plaintext_len);
+   free(plaintext);
+
+   if (ciphertext_len < 0)
+@@ -133,7 +207,7 @@
+     return 1;
+   }
+
+-  if (write_vlt_file(output_path, salt, iv, tag, input_path,
++  if (write_vlt_file(output_path, salt, iv, tag, stored_name,
+                      ciphertext, (size_t)ciphertext_len) != 0)
+   {
+     fprintf(stderr, "Error: could not write output file '%s'\n", output_path);
+@@ -160,9 +234,10 @@
+   char *original_filename = NULL;
+   unsigned char *ciphertext = NULL;
+   size_t ciphertext_len = 0;
++  int version = 0;
+
+   if (read_vlt_file(input_path, salt, iv, tag, &original_filename,
+-                    &ciphertext, &ciphertext_len) != 0)
++                    &ciphertext, &ciphertext_len, &version) != 0)
+   {
+     fprintf(stderr, "Error: could not read or parse '%s'\n", input_path);
+     return 1;
+@@ -197,7 +272,13 @@
+     return 1;
+   }
+
+-  int plaintext_len = decrypt_data(key, ciphertext, (int)ciphertext_len, iv, tag, plaintext);
++  // VLT2 authenticates the header and file name; legacy VLT1 files have no AAD
++  unsigned char aad[AAD_MAX];
++  size_t aad_len = (version == 2) ? build_aad(aad, salt, iv, original_filename) : 0;
++
++  int plaintext_len = decrypt_data(key, ciphertext, (int)ciphertext_len, iv, tag,
++                                   aad, (int)aad_len, plaintext);
++  OPENSSL_cleanse(key, sizeof(key));
+   free(ciphertext);
+
+   if (plaintext_len < 0)
+@@ -218,6 +299,7 @@
+
+   printf("Decrypted successfully: %s -> %s\n", input_path, original_filename);
+   free(original_filename);
++  OPENSSL_cleanse(plaintext, (size_t)plaintext_len);
+   free(plaintext);
+   return 0;
+ }
+@@ -234,18 +316,33 @@
+   const char *input_path = argv[2];
+   const char *password = argv[3];
+
++  char pw_buf[MAX_PASSWORD_LEN + 1];
++  if (strcmp(argv[3], "--password-stdin") == 0)
++  {
++    if (read_password_stdin(pw_buf, sizeof(pw_buf)) != 0)
++    {
++      fprintf(stderr, "Error: could not read password\n");
++      return 1;
++    }
++    password = pw_buf;
++  }
++
++  int rc;
+   if (strcmp(command, "encrypt") == 0)
+   {
+-    return do_encrypt(input_path, password);
++    rc = do_encrypt(input_path, password);
+   }
+   else if (strcmp(command, "decrypt") == 0)
+   {
+-    return do_decrypt(input_path, password);
++    rc = do_decrypt(input_path, password);
+   }
+   else
+   {
+     fprintf(stderr, "Error: unknown command '%s'\n", command);
+     print_usage(argv[0]);
+-    return 1;
++    rc = 1;
+   }
++
++  OPENSSL_cleanse(pw_buf, sizeof(pw_buf));
++  return rc;
+ }

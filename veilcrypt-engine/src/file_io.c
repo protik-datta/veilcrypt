@@ -1,6 +1,9 @@
 #include "file_io.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <unistd.h>
 
 #define CHUNK_SIZE 4096
 
@@ -51,25 +54,78 @@ unsigned char *read_file_to_buffer(const char *filepath, size_t *out_size)
   return buffer;
 }
 
-int write_buffer_to_file(const char *filepath, const unsigned char *data, size_t size)
+FILE *secure_tmp_open(const char *final_path, char *tmp_path, size_t tmp_size)
 {
-  FILE *fp = fopen(filepath, "wb");
+  int n = snprintf(tmp_path, tmp_size, "%s.tmp.XXXXXX", final_path);
+  if (n < 0 || (size_t)n >= tmp_size)
+  {
+    fprintf(stderr, "secure_tmp_open: path too long\n");
+    return NULL;
+  }
+
+  int fd = mkstemp(tmp_path); // creates the file with mode 0600
+  if (fd < 0)
+  {
+    perror("secure_tmp_open: mkstemp failed");
+    return NULL;
+  }
+
+  FILE *fp = fdopen(fd, "wb");
   if (fp == NULL)
   {
-    perror("write_buffer_to_file: fopen failed");
-    return -1;
+    perror("secure_tmp_open: fdopen failed");
+    close(fd);
+    unlink(tmp_path);
+    return NULL;
   }
+  return fp;
+}
 
-  size_t bytes_written = fwrite(data, 1, size, fp);
+void secure_tmp_abort(FILE *fp, const char *tmp_path)
+{
   fclose(fp);
+  unlink(tmp_path);
+}
 
-  if (bytes_written != size)
+int secure_tmp_commit(FILE *fp, const char *tmp_path, const char *final_path)
+{
+  // Surface disk-full / I/O errors instead of reporting a false success
+  if (fflush(fp) != 0 || ferror(fp) || fsync(fileno(fp)) != 0)
   {
-    fprintf(stderr, "write_buffer_to_file: short write (%zu of %zu bytes)\n", bytes_written, size);
+    perror("secure_tmp_commit: write failed");
+    secure_tmp_abort(fp, tmp_path);
+    return -1;
+  }
+  if (fclose(fp) != 0)
+  {
+    perror("secure_tmp_commit: fclose failed");
+    unlink(tmp_path);
+    return -1;
+  }
+  if (rename(tmp_path, final_path) != 0)
+  {
+    perror("secure_tmp_commit: rename failed");
+    unlink(tmp_path);
+    return -1;
+  }
+  return 0;
+}
+
+int write_buffer_to_file(const char *filepath, const unsigned char *data, size_t size)
+{
+  char tmp_path[1100];
+  FILE *fp = secure_tmp_open(filepath, tmp_path, sizeof(tmp_path));
+  if (fp == NULL)
+    return -1;
+
+  if (size > 0 && fwrite(data, 1, size, fp) != size)
+  {
+    fprintf(stderr, "write_buffer_to_file: short write\n");
+    secure_tmp_abort(fp, tmp_path);
     return -1;
   }
 
-  return 0;
+  return secure_tmp_commit(fp, tmp_path, filepath);
 }
 
 int copy_file_chunked(const char *src_path, const char *dest_path)
