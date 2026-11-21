@@ -8,7 +8,7 @@ pass() { echo "  ✓ PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "  ✗ FAIL: $1"; FAIL=$((FAIL+1)); }
 
 cleanup() {
-    rm -f test_*.txt test_*.veil test_*.decrypted tampered.veil fake.veil
+    rm -rf test_*.txt test_*.veil test_*.decrypted test_sandbox tampered.veil fake.veil
 }
 
 echo "=== Veilcrypt Test Suite ==="
@@ -129,6 +129,107 @@ else
     fail "binary file corrupted during round-trip"
 fi
 rm -f test_binary_original.bin test_binary.bin
+
+# ---------------------------------------------------------------
+# Security tests (VLT2): path traversal, filename authentication,
+# stdin password, file permissions
+# ---------------------------------------------------------------
+
+# forge_veil <good.veil> <new_filename> <out.veil>
+# Rebuilds a .veil with a different stored filename (header and ciphertext untouched).
+# Layout: 48-byte header | 2-byte LE name length | name | ciphertext
+forge_veil() {
+    local src="$1" newname="$2" out="$3"
+    local old_len new_len
+    old_len=$(( $(od -An -tu1 -j48 -N1 "$src" | tr -d ' ') + 256 * $(od -An -tu1 -j49 -N1 "$src" | tr -d ' ') ))
+    new_len=${#newname}
+    {
+        head -c 48 "$src"
+        printf "\\x$(printf '%02x' $((new_len % 256)))\\x$(printf '%02x' $((new_len / 256)))"
+        printf '%s' "$newname"
+        tail -c +$((48 + 2 + old_len + 1)) "$src"
+    } > "$out"
+}
+
+# Test 11: stored filename never contains directories
+echo "Test 11: Directory part is not stored in the header"
+mkdir -p test_sandbox/sub
+echo "nested" > test_sandbox/sub/test_nested.txt
+$VEILCRYPT encrypt test_sandbox/sub/test_nested.txt testpass123 > /dev/null 2>&1
+if [ -f test_sandbox/sub/test_nested.veil ] && ! grep -a -q "sub/" test_sandbox/sub/test_nested.veil \
+   && grep -a -q "test_nested.txt" test_sandbox/sub/test_nested.veil; then
+    pass "only the bare file name is stored"
+else
+    fail "directory path leaked into the .veil header"
+fi
+
+# Test 12: forged '../' filename is rejected and nothing escapes the folder
+echo "Test 12: Path traversal filename rejected"
+mkdir -p test_sandbox/inner
+echo "payload" > test_sandbox/test_pt.txt
+( cd test_sandbox && ../$VEILCRYPT encrypt test_pt.txt testpass123 > /dev/null 2>&1 )
+forge_veil test_sandbox/test_pt.veil "../escaped.txt" test_sandbox/inner/forged.veil
+( cd test_sandbox/inner && ../../$VEILCRYPT decrypt forged.veil testpass123 > /tmp/veilcrypt_test_out 2>&1 )
+if grep -q "Error" /tmp/veilcrypt_test_out && [ ! -f test_sandbox/escaped.txt ] && [ ! -f test_sandbox/inner/escaped.txt ]; then
+    pass "'../' filename rejected, nothing written"
+else
+    fail "path traversal NOT blocked — security issue!"
+fi
+
+# Test 13: absolute path and backslash filenames rejected
+echo "Test 13: Absolute path / backslash filename rejected"
+forge_veil test_sandbox/test_pt.veil "/tmp/veilcrypt_abs_escape.txt" test_sandbox/inner/abs.veil
+forge_veil test_sandbox/test_pt.veil "..\\win.txt" test_sandbox/inner/bs.veil
+rm -f /tmp/veilcrypt_abs_escape.txt
+( cd test_sandbox/inner && ../../$VEILCRYPT decrypt abs.veil testpass123 > /tmp/veilcrypt_test_out1 2>&1 )
+( cd test_sandbox/inner && ../../$VEILCRYPT decrypt bs.veil testpass123 > /tmp/veilcrypt_test_out2 2>&1 )
+if grep -q "Error" /tmp/veilcrypt_test_out1 && grep -q "Error" /tmp/veilcrypt_test_out2 \
+   && [ ! -f /tmp/veilcrypt_abs_escape.txt ]; then
+    pass "absolute and backslash filenames rejected"
+else
+    fail "unsafe filename accepted — security issue!"
+    rm -f /tmp/veilcrypt_abs_escape.txt
+fi
+
+# Test 14: a harmless-looking filename swap is caught by authentication
+echo "Test 14: Filename is authenticated"
+forge_veil test_sandbox/test_pt.veil "other.txt" test_sandbox/inner/swap.veil
+( cd test_sandbox/inner && ../../$VEILCRYPT decrypt swap.veil testpass123 > /tmp/veilcrypt_test_out 2>&1 )
+if grep -q "authentication failed" /tmp/veilcrypt_test_out && [ ! -f test_sandbox/inner/other.txt ]; then
+    pass "renamed file fails authentication"
+else
+    fail "filename tampering was NOT detected — security issue!"
+fi
+
+# Test 15: password via stdin round-trip, and wrong stdin password rejected
+echo "Test 15: --password-stdin"
+echo "stdin secret" > test_stdin.txt
+printf 'p@ss "w0rd" $(x)' | $VEILCRYPT encrypt test_stdin.txt --password-stdin > /dev/null 2>&1
+rm test_stdin.txt
+printf 'wrong' | $VEILCRYPT decrypt test_stdin.veil --password-stdin > /dev/null 2>&1
+WRONG_LEFT=$([ -f test_stdin.txt ] && echo yes || echo no)
+printf 'p@ss "w0rd" $(x)\n' | $VEILCRYPT decrypt test_stdin.veil --password-stdin > /dev/null 2>&1
+if [ "$WRONG_LEFT" = "no" ] && [ -f test_stdin.txt ] && diff -q <(echo "stdin secret") test_stdin.txt > /dev/null; then
+    pass "stdin password works; wrong one rejected"
+else
+    fail "--password-stdin misbehaved"
+fi
+rm -f test_stdin.txt
+
+# Test 16: output files are owner-only (0600)
+echo "Test 16: Output file permissions"
+echo "private" > test_perm.txt
+$VEILCRYPT encrypt test_perm.txt testpass123 > /dev/null 2>&1
+rm test_perm.txt
+$VEILCRYPT decrypt test_perm.veil testpass123 > /dev/null 2>&1
+if [ "$(ls -l test_perm.veil | cut -c1-10)" = "-rw-------" ] && [ "$(ls -l test_perm.txt | cut -c1-10)" = "-rw-------" ]; then
+    pass "encrypted and decrypted files are 0600"
+else
+    fail "output files are not owner-only"
+fi
+rm -f test_perm.txt
+
+rm -rf test_sandbox /tmp/veilcrypt_test_out1 /tmp/veilcrypt_test_out2
 
 cleanup
 
